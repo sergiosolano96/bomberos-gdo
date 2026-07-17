@@ -110,6 +110,10 @@ jornadas automáticamente según estas reglas:
 > Publique una sola vez; para ajustes puntuales use abrir/cerrar jornadas.
 
 El coordinador también puede:
+- **Agregar jornadas individuales** (fecha + zona + cupo) sin republicar la campaña — útil cuando una
+  zona necesita más días de los que genera la fórmula (p. ej. dar 2–3 días a la zona de Cali). La
+  única restricción estructural: cada fecha pertenece a una sola zona, así que la fecha nueva no
+  puede coincidir con una jornada existente, y debe ser día hábil.
 - **Cerrar o reabrir una jornada** individual (una jornada cerrada no acepta más reservas, pero las que ya tiene se conservan).
 - **Cancelar la sesión de un cuerpo** — el cupo se libera al instante y el cuerpo puede volver a agendarse.
 - **Marcar asistencia** de cada sesión (✔ asistió / ✘ no asistió / — sin marcar) desde la tabla de

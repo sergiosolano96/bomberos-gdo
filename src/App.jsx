@@ -82,6 +82,9 @@ export default function App() {
   const [fInicio, setFInicio] = useState(hoyISO());
   const [cupo, setCupo] = useState(4);
   const [reagendando, setReagendando] = useState(false);
+  const [fJornada, setFJornada] = useState("");
+  const [zJornada, setZJornada] = useState("Z2");
+  const [cupoJornada, setCupoJornada] = useState(4);
   const [campana, setCampana] = useState(null);
   const [historico, setHistorico] = useState([]);
   const [nombreCamp, setNombreCamp] = useState("Campaña " + new Date().getFullYear());
@@ -214,6 +217,16 @@ export default function App() {
     await supabase.from("jornadas").update({ estado: estadoActual === "abierta" ? "cerrada" : "abierta" }).eq("fecha", f);
     cargar();
   };
+  /* Jornada suelta para una zona (ej. día extra en Z2) sin republicar la campaña */
+  const agregarJornada = async () => {
+    if (!fJornada) { setMsg({ t:"bad", m:"Elija la fecha de la nueva jornada." }); return; }
+    const dow = new Date(fJornada + "T12:00:00").getDay();
+    if (dow === 0 || dow === 6) { setMsg({ t:"bad", m:"Elija un día hábil (lunes a viernes)." }); return; }
+    const { error } = await supabase.from("jornadas").insert({ fecha: fJornada, zona: zJornada, cupo: Number(cupoJornada), estado: "abierta" });
+    if (error) setMsg({ t:"bad", m: error.code === "23505" ? "Ya existe una jornada en esa fecha (cada día pertenece a una sola zona). Elija otra fecha." : "Error: " + error.message });
+    else setMsg({ t:"ok", m:`Jornada agregada: ${fJornada} · ${ZONAS[zJornada]} · cupo ${cupoJornada}.` });
+    cargar();
+  };
   const cancelar = async (mid) => {
     await supabase.from("sesiones").delete().eq("muni", mid);
     setMsg({ t:"ok", m:`Cancelada ${M[mid].muni}. Cupo liberado.` });
@@ -248,7 +261,7 @@ export default function App() {
 
   if (cargando) return <div style={{ background:C.bg, color:C.muted, padding:40, fontFamily:"Segoe UI, system-ui, sans-serif" }}>Cargando agenda…</div>;
 
-  const agendados = sesiones.length, pct = Math.round(agendados/46*100);
+  const agendados = sesiones.length, pct = Math.round(agendados/RAW.length*100);
   const asistieron = sesiones.filter(s => s.asistio === true).length;
   const campPrevias = (() => { const m = {}; historico.forEach(h => { m[h.campana] = (m[h.campana] || 0) + 1; }); return Object.entries(m); })();
 
@@ -338,7 +351,7 @@ export default function App() {
                 {campPrevias.length > 0 && <span> · Histórico: {campPrevias.map(([n,c]) => `${n} (${c})`).join(" · ")}</span>}
               </div>
               <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px,1fr))", gap:12 }}>
-                {[["agendados", agendados, C.ok], ["pendientes", 46-agendados, agendados===46?C.ok:C.bad], ["asistieron", asistieron, C.blue], ["cobertura", pct+"%", C.accent], ["jornadas", jornadas.length, C.ink]].map(([l,v,c]) => (
+                {[["agendados", agendados, C.ok], ["pendientes", RAW.length-agendados, agendados===RAW.length?C.ok:C.bad], ["asistieron", asistieron, C.blue], ["cobertura", pct+"%", C.accent], ["jornadas", jornadas.length, C.ink]].map(([l,v,c]) => (
                   <div key={l} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:12 }}><b style={{ display:"block", fontFamily:mono, fontSize:26, color:c, lineHeight:1.1 }}>{v}</b><small style={{ color:C.muted, fontSize:11, textTransform:"uppercase" }}>{l}</small></div>))}
               </div>
               <div style={{ display:"flex", gap:8, marginTop:14, flexWrap:"wrap" }}>
@@ -357,7 +370,17 @@ export default function App() {
                 <div><label style={lbl}>Cupo por día</label><input type="number" min={1} max={7} value={cupo} onChange={e => setCupo(e.target.value)} style={{ ...inp, width:90, fontFamily:mono }} /></div>
                 <button onClick={publicar} style={{ ...btn, background:C.accent, color:"#141414", borderColor:C.accent, fontWeight:700 }}>Publicar campaña</button>
               </div>
-              <p style={{ color:C.muted, fontSize:12, marginBottom:0 }}>Recorre las zonas sur → norte en días hábiles. Con cupo {cupo}: <b style={{ fontFamily:mono, color:C.ink }}>{ORDEN_ZONAS.reduce((a,z) => a + Math.ceil(RAW.filter(r => r[5]===z).length/cupo), 0)} jornadas</b> para los 46 cuerpos. <span style={{ color:C.warn }}>Republicar reemplaza las jornadas existentes. Para iniciar una campaña nueva, primero use «Cerrar campaña» (archiva las sesiones al histórico).</span></p>
+              <p style={{ color:C.muted, fontSize:12, marginBottom:0 }}>Recorre las zonas sur → norte en días hábiles. Con cupo {cupo}: <b style={{ fontFamily:mono, color:C.ink }}>{ORDEN_ZONAS.reduce((a,z) => a + Math.ceil(RAW.filter(r => r[5]===z).length/cupo), 0)} jornadas</b> para los {RAW.length} cuerpos. <span style={{ color:C.warn }}>Republicar reemplaza las jornadas existentes. Para iniciar una campaña nueva, primero use «Cerrar campaña» (archiva las sesiones al histórico).</span></p>
+              <div style={{ borderTop:`1px solid ${C.line}`, marginTop:14, paddingTop:12 }}>
+                <label style={lbl}>Agregar jornada individual (día extra para una zona, sin republicar)</label>
+                <div style={{ display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end" }}>
+                  <div><label style={lbl}>Fecha</label><input type="date" value={fJornada} onChange={e => setFJornada(e.target.value)} style={inp} /></div>
+                  <div><label style={lbl}>Zona</label><select value={zJornada} onChange={e => setZJornada(e.target.value)} style={inp}>{ORDEN_ZONAS.map(z => <option key={z} value={z}>{ZONAS[z]}</option>)}</select></div>
+                  <div><label style={lbl}>Cupo</label><input type="number" min={1} max={7} value={cupoJornada} onChange={e => setCupoJornada(e.target.value)} style={{ ...inp, width:80, fontFamily:mono }} /></div>
+                  <button onClick={agregarJornada} style={btn}>+ Agregar jornada</button>
+                </div>
+                <p style={{ color:C.muted, fontSize:12, marginBottom:0 }}>La fecha no puede coincidir con una jornada existente: cada día pertenece a una sola zona.</p>
+              </div>
             </Card>
 
             <Card title="Cobertura por zona — quién falta" icon={<AlertTriangle size={14} />}>
