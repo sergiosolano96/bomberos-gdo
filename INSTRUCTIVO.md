@@ -37,9 +37,9 @@ las restricciones físicas del recorrido.
    central. La pantalla se refresca sola cada 20 segundos: si otro cuerpo toma un cupo, esa opción
    desaparece de las demás pantallas.
 
-4. **Una sesión por cuerpo.** Cada cuerpo tiene derecho a exactamente una sesión. Es una regla
-   estructural de la base de datos (el municipio es la llave primaria), no un simple aviso: es
-   imposible duplicarse.
+4. **Una sesión por cuerpo por campaña.** Cada cuerpo tiene derecho a exactamente una sesión en la
+   campaña activa. Es una regla estructural de la base de datos (el municipio es la llave primaria),
+   no un simple aviso: es imposible duplicarse. Sí puede **reagendar** su sesión mientras haya cupo.
 
 5. **La geografía manda.** Los desplazamientos son la restricción más cara de la operación, por eso
    la campaña se organiza **por zonas** y los tiempos de viaje usados son **reales** (minutos de
@@ -93,8 +93,9 @@ Estos valores están definidos en el código (`src/App.jsx`, constantes `DUR`, `
 El coordinador ingresa a la pestaña **Coordinador** con un PIN (guardado en la base de datos, tabla
 `config`; el valor inicial es `GDO2026` y **debe cambiarse** antes de compartir el enlace).
 
-Al **publicar la campaña** solo define dos cosas: la **fecha de inicio** y el **cupo por día**. Con
-eso el sistema genera todas las jornadas automáticamente según estas reglas:
+Al **publicar la campaña** define tres cosas: el **nombre de la campaña** (para identificarla en el
+histórico), la **fecha de inicio** y el **cupo por día**. Con eso el sistema genera todas las
+jornadas automáticamente según estas reglas:
 
 1. Recorre las zonas en un **orden fijo sur → norte**: Z2 → Z4 → Z3 → Z1 → Z5 → Z6 → Z7 → Z8.
    La lógica: empezar por el área metropolitana y el sur, e ir subiendo hacia el norte del Valle para
@@ -111,7 +112,26 @@ eso el sistema genera todas las jornadas automáticamente según estas reglas:
 El coordinador también puede:
 - **Cerrar o reabrir una jornada** individual (una jornada cerrada no acepta más reservas, pero las que ya tiene se conservan).
 - **Cancelar la sesión de un cuerpo** — el cupo se libera al instante y el cuerpo puede volver a agendarse.
+- **Marcar asistencia** de cada sesión (✔ asistió / ✘ no asistió / — sin marcar) desde la tabla de
+  sesiones. El indicador "asistieron" del tablero y las exportaciones reflejan la marca.
 - **Exportar toda la agenda a un archivo `.ics`** e importarla en Google Calendar (eventos con zona horaria de Bogotá, incluyen comandante, correo y zona de cada cuerpo).
+- **Exportar a CSV/Excel** las sesiones de la campaña activa (fecha, municipio, zona, comandante,
+  correo, horario y asistencia) o el **histórico completo de campañas cerradas**.
+
+### Ciclo de vida de las campañas
+
+El sistema maneja **una campaña activa a la vez**, pero soporta campañas sucesivas (anuales,
+semestrales, por tema) mediante el botón **«Cerrar campaña»**:
+
+1. Al cerrar, todas las sesiones (con su asistencia) se **archivan al histórico** bajo el nombre de
+   la campaña, y se limpian las jornadas. Todo ocurre en una sola transacción en el servidor.
+2. El sistema queda listo para **publicar la siguiente campaña**: los 46 cuerpos recuperan su derecho
+   a una nueva sesión.
+3. El histórico nunca se borra desde la app: queda disponible para el CSV de reportes y para
+   comparar cobertura entre campañas.
+
+> Orden correcto entre campañas: **Cerrar campaña → Publicar la nueva.** Si se republica sin cerrar,
+> se reemplazan las jornadas de la campaña en curso (mismo nombre, misma campaña), no se crea una nueva.
 
 ---
 
@@ -136,6 +156,12 @@ itinerario del día, el recorrido completo del instructor siga siendo físicamen
 
 Ejemplo: si Buenaventura ya reservó 08:00–09:30, Dagua (a 85 min de camino) no verá el horario de
 10:00 — el primero factible que le aparecerá será 11:00.
+
+**Reagendamiento por el propio cuerpo.** Un cuerpo que ya tiene sesión puede moverla él mismo con el
+botón **«Reagendar sesión»**: ve las jornadas de su zona con cupo (sin contar el suyo propio) y los
+horarios factibles. Su cupo actual **solo se libera cuando confirma el nuevo horario** — si se
+arrepiente o no hay alternativas, su sesión original queda intacta. La operación es atómica en el
+servidor: nunca queda "sin sesión" a mitad de camino.
 
 **Confirmación con doble validación anti-colisión.** Al presionar "Confirmar reserva" ocurren dos
 verificaciones, porque entre que el usuario miró la pantalla y presionó el botón, otro cuerpo pudo
@@ -191,6 +217,8 @@ reservar:
 
 - **Un solo equipo instructor.** Todo el motor de rutas asume un único recorrido por día. Dos
   equipos en paralelo requerirían cambios de diseño.
+- **Una campaña activa a la vez.** Las campañas son sucesivas, no simultáneas; las cerradas viven en
+  el histórico (solo lectura desde la app).
 - **Los tiempos de viaje son fijos** (cacheados de Google Maps). No consideran tráfico del día,
   derrumbes ni cierres de vía. Son conducción en condiciones normales.
 - **Viajes solo intra-zona.** El sistema no valida el desplazamiento entre la última sesión de una

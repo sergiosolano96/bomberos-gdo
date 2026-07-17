@@ -81,17 +81,25 @@ export default function App() {
   const [auth, setAuth] = useState(false);
   const [fInicio, setFInicio] = useState(hoyISO());
   const [cupo, setCupo] = useState(4);
+  const [reagendando, setReagendando] = useState(false);
+  const [campana, setCampana] = useState(null);
+  const [historico, setHistorico] = useState([]);
+  const [nombreCamp, setNombreCamp] = useState("Campaña " + new Date().getFullYear());
 
   const cargar = async () => {
     try {
-      const [j, s, c] = await Promise.all([
+      const [j, s, c, k, h] = await Promise.all([
         supabase.from("jornadas").select("*"),
         supabase.from("sesiones").select("*"),
         supabase.from("config").select("*").eq("clave","pin").maybeSingle(),
+        supabase.from("campanas").select("*").is("cerrada_en", null).order("creada_en", { ascending: false }).limit(1),
+        supabase.from("historico").select("*"),
       ]);
       setJornadas((j.data || []).map(x => ({ ...x, fecha: String(x.fecha).slice(0,10) })));
       setSesiones((s.data || []).map(x => ({ ...x, fecha: String(x.fecha).slice(0,10) })));
       if (c.data && c.data.valor) setPinDB(c.data.valor);
+      setCampana(k.data && k.data.length ? k.data[0] : null);
+      setHistorico((h.data || []).map(x => ({ ...x, fecha: String(x.fecha).slice(0,10) })));
     } catch (e) {
       setMsg({ t:"bad", m:"Error de conexión con la base de datos. Revise su internet." });
     }
@@ -102,40 +110,44 @@ export default function App() {
   const munisOrd = useMemo(() => RAW.map(r => ({ id:r[0], muni:r[1], zona:r[5] })).sort((a,b) => a.muni.localeCompare(b.muni)), []);
   const yaAgendado = muni ? sesiones.find(s => s.muni === muni) : null;
 
+  /* Al reagendar, la propia sesión no cuenta ni para cupo ni para ruta */
+  const sesBase = useMemo(() => (reagendando && muni) ? sesiones.filter(s => s.muni !== muni) : sesiones, [sesiones, reagendando, muni]);
+
   const fechasDisp = useMemo(() => {
-    if (!muni || yaAgendado) return [];
+    if (!muni || (yaAgendado && !reagendando)) return [];
     const z = M[muni].zona, h = hoyISO();
     return jornadas
       .filter(j => j.zona === z && j.estado === "abierta" && j.fecha >= h)
-      .map(j => ({ ...j, libres: j.cupo - sesiones.filter(s => s.fecha === j.fecha).length }))
+      .map(j => ({ ...j, libres: j.cupo - sesBase.filter(s => s.fecha === j.fecha).length }))
       .filter(j => j.libres > 0)
       .sort((a,b) => a.fecha.localeCompare(b.fecha));
-  }, [jornadas, sesiones, muni, yaAgendado]);
+  }, [jornadas, sesBase, muni, yaAgendado, reagendando]);
 
   const horas = useMemo(() => {
     if (!muni || !fecha) return [];
     const j = jornadas.find(x => x.fecha === fecha);
-    if (!j || sesiones.filter(s => s.fecha === fecha).length >= j.cupo) return [];
-    return slots(sesiones, muni, fecha);
-  }, [jornadas, sesiones, muni, fecha]);
+    if (!j || sesBase.filter(s => s.fecha === fecha).length >= j.cupo) return [];
+    return slots(sesBase, muni, fecha);
+  }, [jornadas, sesBase, muni, fecha]);
 
-  /* Reservar vía RPC atómica (valida cupo en el servidor) + revalida desplazamiento local */
+  /* Reservar o reagendar vía RPC atómica (valida cupo en el servidor) + revalida desplazamiento local */
   const reservar = async () => {
     if (!muni || !fecha || !ini) { setMsg({ t:"bad", m:"Complete los tres pasos." }); return; }
     // Refresca estado antes de validar desplazamiento
     const { data: sFresh } = await supabase.from("sesiones").select("*");
     const ses = (sFresh || []).map(x => ({ ...x, fecha: String(x.fecha).slice(0,10) }));
-    if (!factible(ses, muni, fecha, toMin(ini))) {
+    const base = reagendando ? ses.filter(s => s.muni !== muni) : ses;
+    if (!factible(base, muni, fecha, toMin(ini))) {
       setSesiones(ses); setIni(""); setMsg({ t:"bad", m:"Ese horario ya no es viable (otro cuerpo reservó). Elija otro." });
       return;
     }
-    const { data, error } = await supabase.rpc("reservar_sesion", {
-      p_muni: muni, p_zona: M[muni].zona, p_fecha: fecha, p_ini: ini,
-    });
+    const { data, error } = reagendando
+      ? await supabase.rpc("reagendar_sesion", { p_muni: muni, p_fecha: fecha, p_ini: ini })
+      : await supabase.rpc("reservar_sesion", { p_muni: muni, p_zona: M[muni].zona, p_fecha: fecha, p_ini: ini });
     if (error) { setMsg({ t:"bad", m:"Error al reservar: " + error.message }); return; }
     if (data && data.ok) {
-      setMsg({ t:"ok", m:`Confirmado · ${M[muni].muni} · ${fecha} · ${ini}–${toHHMM(toMin(ini)+DUR)}` });
-      setMuni(""); setFecha(""); setIni("");
+      setMsg({ t:"ok", m:`${reagendando ? "Reagendado" : "Confirmado"} · ${M[muni].muni} · ${fecha} · ${ini}–${toHHMM(toMin(ini)+DUR)}` });
+      setMuni(""); setFecha(""); setIni(""); setReagendando(false);
     } else {
       setMsg({ t:"bad", m:(data && data.msg) || "No se pudo reservar." });
     }
@@ -156,9 +168,47 @@ export default function App() {
     });
     await supabase.from("jornadas").delete().neq("fecha", "1900-01-01");
     const { error } = await supabase.from("jornadas").insert(out);
+    // Registra o renombra la campaña activa (republicar no crea una nueva)
+    const { data: act } = await supabase.from("campanas").select("id").is("cerrada_en", null).limit(1);
+    if (act && act.length) await supabase.from("campanas").update({ nombre: nombreCamp }).eq("id", act[0].id);
+    else await supabase.from("campanas").insert({ nombre: nombreCamp });
     if (error) setMsg({ t:"bad", m:"Error: " + error.message });
-    else setMsg({ t:"ok", m:`${out.length} jornadas publicadas desde ${fInicio}.` });
+    else setMsg({ t:"ok", m:`${out.length} jornadas publicadas desde ${fInicio} · ${nombreCamp}.` });
     cargar();
+  };
+  const cerrarCampana = async () => {
+    if (!window.confirm(`¿Cerrar la campaña${campana ? ` "${campana.nombre}"` : ""}? Las sesiones pasan al histórico y se borran todas las jornadas. Esta acción no se puede deshacer.`)) return;
+    const { data, error } = await supabase.rpc("cerrar_campana");
+    if (error) setMsg({ t:"bad", m:"Error al cerrar: " + error.message });
+    else setMsg({ t:"ok", m:`Campaña cerrada. ${data.archivadas} sesión(es) archivadas al histórico.` });
+    cargar();
+  };
+  const marcarAsistencia = async (s) => {
+    const next = s.asistio === true ? false : s.asistio === false ? null : true;
+    await supabase.from("sesiones").update({ asistio: next }).eq("muni", s.muni);
+    cargar();
+  };
+  const aCSV = (filas, nombre) => {
+    const csv = filas.map(r => r.map(x => `"${String(x == null ? "" : x).replace(/"/g, '""')}"`).join(";")).join("\r\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" }));
+    a.download = nombre; a.click();
+  };
+  const csvSesiones = () => {
+    const filas = [["Fecha","Municipio","Zona","Comandante","Email","Inicio","Fin","Asistió"],
+      ...[...sesiones].sort((a,b) => (a.fecha+a.ini).localeCompare(b.fecha+b.ini)).map(s => {
+        const m = M[s.muni];
+        return [s.fecha, m.muni, ZONAS[m.zona], m.cmd, m.email, s.ini, toHHMM(toMin(s.ini)+DUR), s.asistio === true ? "sí" : s.asistio === false ? "no" : ""];
+      })];
+    aCSV(filas, `sesiones_${((campana && campana.nombre) || "campana").replace(/\s+/g, "_")}.csv`);
+  };
+  const csvHistorico = () => {
+    const filas = [["Campaña","Fecha","Municipio","Zona","Comandante","Inicio","Asistió"],
+      ...[...historico].sort((a,b) => (a.campana + a.fecha).localeCompare(b.campana + b.fecha)).map(h => {
+        const m = M[h.muni] || { muni: h.muni, zona: "", cmd: "" };
+        return [h.campana, h.fecha, m.muni, ZONAS[m.zona] || "", m.cmd, h.ini, h.asistio === true ? "sí" : h.asistio === false ? "no" : ""];
+      })];
+    aCSV(filas, "historico_campanas.csv");
   };
   const toggleJornada = async (f, estadoActual) => {
     await supabase.from("jornadas").update({ estado: estadoActual === "abierta" ? "cerrada" : "abierta" }).eq("fecha", f);
@@ -199,6 +249,8 @@ export default function App() {
   if (cargando) return <div style={{ background:C.bg, color:C.muted, padding:40, fontFamily:"Segoe UI, system-ui, sans-serif" }}>Cargando agenda…</div>;
 
   const agendados = sesiones.length, pct = Math.round(agendados/46*100);
+  const asistieron = sesiones.filter(s => s.asistio === true).length;
+  const campPrevias = (() => { const m = {}; historico.forEach(h => { m[h.campana] = (m[h.campana] || 0) + 1; }); return Object.entries(m); })();
 
   return (
     <div style={{ background:C.bg, color:C.ink, minHeight:"100vh", fontFamily:"Segoe UI, system-ui, Arial, sans-serif", fontSize:15 }}>
@@ -223,7 +275,7 @@ export default function App() {
             <div style={{ display:"grid", gap:16, gridTemplateColumns:"repeat(auto-fit, minmax(330px, 1fr))" }}>
               <Card title="Reservar sesión" icon={<Calendar size={14} />}>
                 <label style={{ display:"block", fontSize:12, color:C.muted, margin:"4px 0 5px", textTransform:"uppercase" }}>1 · Cuerpo de bomberos</label>
-                <select value={muni} onChange={e => { setMuni(e.target.value); setFecha(""); setIni(""); setMsg(null); }} style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, color:C.ink, padding:"9px 10px", borderRadius:8, fontSize:14 }}>
+                <select value={muni} onChange={e => { setMuni(e.target.value); setFecha(""); setIni(""); setReagendando(false); setMsg(null); }} style={{ width:"100%", background:C.panel, border:`1px solid ${C.line}`, color:C.ink, padding:"9px 10px", borderRadius:8, fontSize:14 }}>
                   <option value="">— Seleccione —</option>
                   {munisOrd.map(m => <option key={m.id} value={m.id}>{m.muni}</option>)}
                 </select>
@@ -231,9 +283,19 @@ export default function App() {
 
                 <label style={{ display:"block", fontSize:12, color:C.muted, margin:"14px 0 5px", textTransform:"uppercase" }}>2 · Jornada disponible en su zona</label>
                 {!muni ? <span style={{ color:C.muted, fontFamily:mono, fontSize:12 }}>Elija su municipio…</span>
-                  : yaAgendado ? <Msg tipo="ok">Ya tiene sesión: {yaAgendado.fecha} a las {yaAgendado.ini}.</Msg>
-                  : !fechasDisp.length ? <Msg tipo="bad">No hay jornadas abiertas para su zona. Contacte al coordinador.</Msg>
-                  : <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>{fechasDisp.map(f => <Chip key={f.fecha} sel={fecha===f.fecha} sub={`${f.libres} cupo(s)`} onClick={() => { setFecha(f.fecha); setIni(""); setMsg(null); }}>{f.fecha}</Chip>)}</div>}
+                  : (yaAgendado && !reagendando) ? (
+                    <div>
+                      <Msg tipo="ok">Ya tiene sesión: {yaAgendado.fecha} a las {yaAgendado.ini}.</Msg>
+                      <button onClick={() => { setReagendando(true); setFecha(""); setIni(""); setMsg(null); }} style={{ ...btn, marginTop:10 }}><RefreshCw size={13} /> Reagendar sesión</button>
+                    </div>
+                  )
+                  : !fechasDisp.length ? <Msg tipo="bad">{reagendando ? "No hay otras jornadas con cupo en su zona. Su sesión actual se conserva." : "No hay jornadas abiertas para su zona. Contacte al coordinador."}</Msg>
+                  : (
+                    <div>
+                      {reagendando && <Msg tipo="info">Reagendando: su cupo actual ({yaAgendado.fecha} {yaAgendado.ini}) solo se libera al confirmar el nuevo horario. <button onClick={() => { setReagendando(false); setFecha(""); setIni(""); }} style={{ ...btn, padding:"3px 8px", fontSize:11, marginLeft:8 }}>conservar la actual</button></Msg>}
+                      <div style={{ display:"flex", flexWrap:"wrap", gap:8, marginTop: reagendando ? 10 : 0 }}>{fechasDisp.map(f => <Chip key={f.fecha} sel={fecha===f.fecha} sub={`${f.libres} cupo(s)`} onClick={() => { setFecha(f.fecha); setIni(""); setMsg(null); }}>{f.fecha}</Chip>)}</div>
+                    </div>
+                  )}
 
                 <label style={{ display:"block", fontSize:12, color:C.muted, margin:"14px 0 5px", textTransform:"uppercase" }}>3 · Hora de inicio</label>
                 {!fecha ? <span style={{ color:C.muted, fontFamily:mono, fontSize:12 }}>Elija una jornada…</span>
@@ -241,7 +303,7 @@ export default function App() {
                   : <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>{horas.map(h => <Chip key={h} sel={ini===h} onClick={() => setIni(h)}>{h}</Chip>)}</div>}
 
                 {ini && <Msg tipo="info">Sesión {ini} → {toHHMM(toMin(ini)+DUR)} ({DUR} min).</Msg>}
-                <button onClick={reservar} disabled={!muni || !fecha || !ini} style={{ width:"100%", marginTop:14, padding:"11px 14px", borderRadius:8, border:"none", fontWeight:700, fontSize:14, cursor: (!muni||!fecha||!ini)?"not-allowed":"pointer", background:C.ok, color:"#08130c", opacity:(!muni||!fecha||!ini)?0.45:1 }}>Confirmar reserva</button>
+                <button onClick={reservar} disabled={!muni || !fecha || !ini} style={{ width:"100%", marginTop:14, padding:"11px 14px", borderRadius:8, border:"none", fontWeight:700, fontSize:14, cursor: (!muni||!fecha||!ini)?"not-allowed":"pointer", background:C.ok, color:"#08130c", opacity:(!muni||!fecha||!ini)?0.45:1 }}>{reagendando ? "Confirmar reagendamiento" : "Confirmar reserva"}</button>
               </Card>
 
               <Card title="Sesiones confirmadas" icon={<CheckCircle2 size={14} />}>
@@ -271,23 +333,31 @@ export default function App() {
         {tab === "coordinador" && auth && (
           <>
             <Card title="Estado de la campaña" icon={<Users size={14} />}>
+              <div style={{ fontFamily:mono, fontSize:12.5, color:C.muted, marginBottom:12 }}>
+                Campaña activa: <b style={{ color:C.ink }}>{campana ? campana.nombre : "— (se registra al publicar)"}</b>
+                {campPrevias.length > 0 && <span> · Histórico: {campPrevias.map(([n,c]) => `${n} (${c})`).join(" · ")}</span>}
+              </div>
               <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(120px,1fr))", gap:12 }}>
-                {[["agendados", agendados, C.ok], ["pendientes", 46-agendados, agendados===46?C.ok:C.bad], ["cobertura", pct+"%", C.accent], ["jornadas", jornadas.length, C.ink]].map(([l,v,c]) => (
+                {[["agendados", agendados, C.ok], ["pendientes", 46-agendados, agendados===46?C.ok:C.bad], ["asistieron", asistieron, C.blue], ["cobertura", pct+"%", C.accent], ["jornadas", jornadas.length, C.ink]].map(([l,v,c]) => (
                   <div key={l} style={{ background:C.panel, border:`1px solid ${C.line}`, borderRadius:10, padding:12 }}><b style={{ display:"block", fontFamily:mono, fontSize:26, color:c, lineHeight:1.1 }}>{v}</b><small style={{ color:C.muted, fontSize:11, textTransform:"uppercase" }}>{l}</small></div>))}
               </div>
               <div style={{ display:"flex", gap:8, marginTop:14, flexWrap:"wrap" }}>
                 <button onClick={cargar} style={btn}><RefreshCw size={13} /> Actualizar</button>
                 <button onClick={descargarICS} disabled={!sesiones.length} style={{ ...btn, opacity: sesiones.length?1:.4 }}><Download size={13} /> Exportar .ics → Google Calendar</button>
+                <button onClick={csvSesiones} disabled={!sesiones.length} style={{ ...btn, opacity: sesiones.length?1:.4 }}><Download size={13} /> Exportar CSV</button>
+                <button onClick={csvHistorico} disabled={!historico.length} style={{ ...btn, opacity: historico.length?1:.4 }}><Download size={13} /> CSV histórico</button>
+                <button onClick={cerrarCampana} disabled={!sesiones.length && !jornadas.length} style={{ ...btn, color:"#ff9a97", opacity:(sesiones.length || jornadas.length)?1:.4 }}><X size={13} /> Cerrar campaña</button>
               </div>
             </Card>
 
             <Card title="Publicar jornadas por zona" icon={<Route size={14} />}>
               <div style={{ display:"flex", gap:12, flexWrap:"wrap", alignItems:"flex-end" }}>
+                <div><label style={lbl}>Nombre de campaña</label><input type="text" value={nombreCamp} onChange={e => setNombreCamp(e.target.value)} style={{ ...inp, width:210 }} /></div>
                 <div><label style={lbl}>Fecha de inicio</label><input type="date" value={fInicio} onChange={e => setFInicio(e.target.value)} style={inp} /></div>
                 <div><label style={lbl}>Cupo por día</label><input type="number" min={1} max={7} value={cupo} onChange={e => setCupo(e.target.value)} style={{ ...inp, width:90, fontFamily:mono }} /></div>
                 <button onClick={publicar} style={{ ...btn, background:C.accent, color:"#141414", borderColor:C.accent, fontWeight:700 }}>Publicar campaña</button>
               </div>
-              <p style={{ color:C.muted, fontSize:12, marginBottom:0 }}>Recorre las zonas sur → norte en días hábiles. Con cupo {cupo}: <b style={{ fontFamily:mono, color:C.ink }}>{ORDEN_ZONAS.reduce((a,z) => a + Math.ceil(RAW.filter(r => r[5]===z).length/cupo), 0)} jornadas</b> para los 46 cuerpos. <span style={{ color:C.warn }}>Republicar reemplaza las jornadas existentes.</span></p>
+              <p style={{ color:C.muted, fontSize:12, marginBottom:0 }}>Recorre las zonas sur → norte en días hábiles. Con cupo {cupo}: <b style={{ fontFamily:mono, color:C.ink }}>{ORDEN_ZONAS.reduce((a,z) => a + Math.ceil(RAW.filter(r => r[5]===z).length/cupo), 0)} jornadas</b> para los 46 cuerpos. <span style={{ color:C.warn }}>Republicar reemplaza las jornadas existentes. Para iniciar una campaña nueva, primero use «Cerrar campaña» (archiva las sesiones al histórico).</span></p>
             </Card>
 
             <Card title="Cobertura por zona — quién falta" icon={<AlertTriangle size={14} />}>
@@ -333,14 +403,15 @@ export default function App() {
             <Card title="Sesiones confirmadas" icon={<CheckCircle2 size={14} />}>
               <div style={{ overflowX:"auto", maxHeight:360 }}>
                 <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
-                  <thead><tr>{["Fecha","Municipio","Comandante","Horario",""].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+                  <thead><tr>{["Fecha","Municipio","Comandante","Horario","Asist.",""].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
                   <tbody>
-                    {sesiones.length === 0 ? <tr><td colSpan={5} style={{ padding:10, color:C.muted }}>Aún sin sesiones.</td></tr>
+                    {sesiones.length === 0 ? <tr><td colSpan={6} style={{ padding:10, color:C.muted }}>Aún sin sesiones.</td></tr>
                       : [...sesiones].sort((a,b) => (a.fecha+a.ini).localeCompare(b.fecha+b.ini)).map(s => (
                         <tr key={s.muni}>
                           <td style={{ ...td, fontFamily:mono }}>{s.fecha}</td><td style={td}>{M[s.muni].muni}</td>
                           <td style={{ ...td, color:C.muted, fontSize:12 }}>{M[s.muni].cmd}</td>
                           <td style={{ ...td, fontFamily:mono }}>{s.ini}–{toHHMM(toMin(s.ini)+DUR)}</td>
+                          <td style={td}><button onClick={() => marcarAsistencia(s)} title="Marcar asistencia: sí → no → sin marcar" style={{ ...btn, padding:"4px 10px", fontSize:13, color: s.asistio === true ? C.ok : s.asistio === false ? "#ff9a97" : C.muted }}>{s.asistio === true ? "✔" : s.asistio === false ? "✘" : "—"}</button></td>
                           <td style={td}><button onClick={() => cancelar(s.muni)} style={{ ...btn, padding:"5px 9px", fontSize:12, color:"#ff9a97" }}><X size={11} /> cancelar</button></td>
                         </tr>))}
                   </tbody>

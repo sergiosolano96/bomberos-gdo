@@ -21,7 +21,10 @@ Stack: React + Vite (frontend estático) · Supabase (Postgres) · Cloudflare Pa
 1. Crea proyecto en [supabase.com](https://supabase.com) → **New project**. Guarda la contraseña de la BD.
 2. Espera a que termine de aprovisionar (~2 min).
 3. Menú **SQL Editor → New query** → pega TODO el contenido de `supabase_schema.sql` → **Run**.
-   - Crea tablas `jornadas`, `sesiones`, `config`, las políticas de acceso y la función atómica `reservar_sesion`.
+   - Crea tablas `jornadas`, `sesiones`, `config`, `campanas`, `historico`, las políticas de acceso
+     y las funciones atómicas `reservar_sesion`, `reagendar_sesion` y `cerrar_campana`.
+   - **¿Base de datos ya creada con una versión anterior?** Ejecuta solo `migracion_v2.sql` (es
+     idempotente) para agregar campañas, histórico, reagendamiento y asistencia.
 4. Menú **Project Settings → API** → copia dos valores:
    - **Project URL** → `https://xxxx.supabase.co`
    - **anon public key** → `eyJhbGci...`
